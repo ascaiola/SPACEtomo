@@ -6,7 +6,12 @@
 # Author:       Fabian Eisenstein
 # Created:      2024/03/20
 # Revision:     v1.3
-# Last Change:  2025/03/14: added dense pattern, added threaded preloading of next map
+# Last Change:  2025/08/25: added LD area selection in tgt menu, removed any target overlay texture code
+#               2025/08/24: replaced target overlay generation with new implementation using drawlist
+#               2025/05/31: outsourced makeTargetOverlay to gui.py, added support for targets using different LD areas
+#               2025/04/12: added InfoBoxManager to stack popups
+#               2025/04/08: fixed tooltip combination of hidden buttons
+#               2025/03/14: added dense pattern, added threaded preloading of next map
 #               2025/03/10: added polygon mode to exclude suggestions, added add suggestions button
 #               2025/02/20: added plot legend
 #               2025/02/10: added outline for reacquire settings
@@ -55,6 +60,7 @@ from SPACEtomo.modules.gui import gui
 from SPACEtomo.modules.gui.thmb import MapWindow
 from SPACEtomo.modules.gui.flm import FlmWindow
 from SPACEtomo.modules.gui.menu import Menu
+from SPACEtomo.modules.gui.info import InfoBoxManager, InfoBox, StatusLine, saveSnapshot
 from SPACEtomo.modules.gui.plot import Plot, PlotBox, PlotPolygon
 from SPACEtomo.modules.gui.map import MMap, Segmentation
 from SPACEtomo.modules.tgt import Targets
@@ -87,10 +93,11 @@ class TargetGUI:
 
         # Left mouse button + Shift functions
         if dpg.is_mouse_button_down(dpg.mvMouseButton_Left) and (dpg.is_key_down(dpg.mvKey_LShift) or dpg.is_key_down(dpg.mvKey_RShift)):
-            if self.targets.addTarget(img_coords, new_area=dpg.is_key_down(dpg.mvKey_T)):
+            ld_area = "V" if dpg.is_key_down(dpg.mvKey_V) else "S" if dpg.is_key_down(dpg.mvKey_S) else "R"
+            if self.targets.addTarget(img_coords, new_area=dpg.is_key_down(dpg.mvKey_T), ld_area=ld_area):
                 self.showTargets()
                 self.showTargetAreaButtons()
-                dpg.show_item(self.menu_right.all_elements["butsave"])
+                self.menu_right.showElements(["butsave"])
 
         # Right mouse button functions
         elif dpg.is_mouse_button_down(dpg.mvMouseButton_Right) or (dpg.is_mouse_button_down(dpg.mvMouseButton_Left) and dpg.is_key_down(dpg.mvKey_E)):
@@ -106,7 +113,7 @@ class TargetGUI:
         elif dpg.is_mouse_button_down(dpg.mvMouseButton_Middle) or (dpg.is_mouse_button_down(dpg.mvMouseButton_Left) and dpg.is_key_down(dpg.mvKey_G)):
             if self.targets.addGeoPoint(img_coords):
                 self.showTargets()
-                dpg.show_item(self.menu_right.all_elements["butsave"])
+                self.menu_right.showElements(["butsave"])
 
         elif dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
 
@@ -142,7 +149,7 @@ class TargetGUI:
                             self.suggestDensePattern()
                         self.showTargets()
                         self.showTargetAreaButtons()
-                        dpg.show_item(self.menu_right.all_elements["butsave"])
+                        self.menu_right.showElements(["butsave"])
 
                     # Add polygon if in polygon mode
                     else:
@@ -167,26 +174,32 @@ class TargetGUI:
             # Target has area_id and point_id, geo_point has only point_id
             if isinstance(self.drag_point, list):
                 # Update target coords
-                self.targets.areas[self.drag_point[0]].points[self.drag_point[1]] += self.loaded_map.microns2px(mouse_coords) - self.loaded_map.microns2px(self.drag_start)
+                self.targets.areas[self.drag_point[0]].points[self.drag_point[1]] = self.loaded_map.microns2px(mouse_coords)# - self.loaded_map.microns2px(self.drag_start)
                 
                 # Clip to map boundaries
-                rec_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.rec_pix_size / self.loaded_map.pix_size).astype(int) 
-                self.targets.areas[self.drag_point[0]].points[self.drag_point[1]] = np.clip(self.targets.areas[self.drag_point[0]].points[self.drag_point[1]], rec_dims // 2, self.loaded_map.img.shape - rec_dims // 2)
+                if self.targets.areas[self.drag_point[0]].ld_areas[self.drag_point[1]] == "V":
+                    tgt_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.view_pix_size / self.loaded_map.pix_size).astype(int)
+                elif self.targets.areas[self.drag_point[0]].ld_areas[self.drag_point[1]] == "S":
+                    tgt_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.search_pix_size / self.loaded_map.pix_size).astype(int)
+                else:
+                    tgt_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.rec_pix_size / self.loaded_map.pix_size).astype(int)
+                self.targets.areas[self.drag_point[0]].points[self.drag_point[1]] = np.clip(self.targets.areas[self.drag_point[0]].points[self.drag_point[1]], tgt_dims // 2, self.loaded_map.img.shape - tgt_dims // 2)
 
                 # Move target overlay without redrawing all targets
-                overlay_id = utils.findIndex(self.plot.overlays, "label", f"tgt_{self.drag_point[0]}_{self.drag_point[1]}")
-                self.plot.shiftOverlay(overlay_id, mouse_coords - self.drag_start)
+                node_id = utils.findIndex(self.plot.draw_nodes, "label", f"tgt_{self.drag_point[0]}_{self.drag_point[1]}")
+                if node_id is None:
+                    node_id = utils.findIndex(self.plot.draw_nodes, "label", f"track_{self.drag_point[0]}_{self.drag_point[1]}")
+                self.plot.shiftDrawNode(node_id, mouse_coords - self.drag_start)
+
             else:
                 # Update geo point coords
                 for area in self.targets.areas:
-                    area.geo_points[self.drag_point] += self.loaded_map.microns2px(mouse_coords) - self.loaded_map.microns2px(self.drag_start)
+                    area.geo_points[self.drag_point] = self.loaded_map.microns2px(mouse_coords)
 
                 # Move geo point overlay without redrawing all targets
-                overlay_id = utils.findIndex(self.plot.overlays, "label", f"geo_0_{self.drag_point}")
-                self.plot.shiftOverlay(overlay_id, mouse_coords - self.drag_start)
+                node_id = utils.findIndex(self.plot.draw_nodes, "label", f"geo_0_{self.drag_point}")
+                self.plot.shiftDrawNode(node_id, mouse_coords - self.drag_start)
 
-            # Update drag start
-            self.drag_start = mouse_coords
 
     def mouseRelease(self, sender, app_data):
         """Handle mouse release and check if any drag points were moved."""
@@ -209,7 +222,7 @@ class TargetGUI:
             self.drag_point = None
             self.drag_start = None
             self.showTargets()
-            dpg.show_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.showElements(["butsave"])
 
     def updateMapList(self, list_only=False):
         """Checks for new maps in folder."""
@@ -252,9 +265,12 @@ class TargetGUI:
     def checkPointFiles(self):
         """Checks if new point file of loaded map was created."""
 
-        # Don't check if no map is loaded or targets are already loaded (or selected)
-        if not self.map_name or (self.targets and len(self.targets) > 0) or self.checked_point_files:
+        # Don't check if no map is loaded or targets are already loaded (or selected) or if there is an active status (e.g. map is loading)
+        if not self.map_name or (self.targets and len(self.targets) > 0) or self.checked_point_files or self.status.status:
+            #log(f"DEBUG: NOT checking point files!")
             return
+        
+        #log(f"DEBUG: Decided to check point files!")
         
         # Get all point files for MM map
         point_files = sorted(self.cur_dir.glob(self.map_name + "_points*.json"))
@@ -283,7 +299,7 @@ class TargetGUI:
 
         # Open box unless already called by box
         if not user_data:
-            gui.showInfoBox("New target coordinates", "Target coordinates for the currently loaded map were found. Do you want to load them?", callback=self.confirmLoadPointFiles, options=["Load", "Cancel"], options_data=[True, False])
+            InfoBoxManager.push(InfoBox("New target coordinates", "Target coordinates for the currently loaded map were found. Do you want to load them?", callback=self.confirmLoadPointFiles, options=["Load", "Cancel"], options_data=[True, False], loading=False))
             self.checked_point_files = True
             return
 
@@ -304,7 +320,7 @@ class TargetGUI:
             # Close map window if open
             self.map_window.hide()
             dpg.split_frame() # Close window before opening warning in next frame
-            gui.showInfoBox("WARNING", "There are unsaved changes to your targets. Please save or discard your targets before loading a new map!", callback=self.saveAndContinue, options=["Save", "Discard"], options_data=[True, False])
+            InfoBoxManager.push(InfoBox("WARNING", "There are unsaved changes to your targets. Please save or discard your targets before loading a new map!", callback=self.saveAndContinue, options=["Save", "Discard"], options_data=[True, False], loading=False))
             return
         
         # Check for valid user_data
@@ -323,7 +339,10 @@ class TargetGUI:
         dpg.set_value(self.menu_left.all_elements["map"], self.map_name)
 
         # Close map window if open
-        self.map_window.hide()
+        if dpg.is_item_visible(self.map_window.map_window):
+            self.map_window.hide()
+            # Split a frame to allow closing the map window if it was selected from there
+            dpg.split_frame()
 
         # Update map list on every button click
         if self.updateMapList():
@@ -350,8 +369,6 @@ class TargetGUI:
         self.lm_window.clearAll()
         # Reset plot
         self.plot.clearAll()
-        # Clear out texture references because textures have been deleted when plot was cleared
-        self.target_overlays = {}
 
         # Reset reacquire settings
         dpg.set_value(self.menu_left.all_elements["center_offset_x"], 0)
@@ -372,8 +389,14 @@ class TargetGUI:
             self.preloaded_data = None
 
         else:
-            # Discard preloaded map to allow preloading next map
-            self.preloaded_data = None
+            # Discard wrong preloaded map to allow preloading next map
+            if self.preloaded_data:
+                # Delete preloaded textures
+                for tex in self.preloaded_data["textures"]:
+                    if dpg.does_item_exist(tex):
+                        dpg.delete_item(tex)
+                        dpg.split_frame(delay=10) # helps to reduce Segmentation fault crashes
+                self.preloaded_data = None
 
             # Load map file
             self.loaded_map = MMap(file_path, pix_size=self.model.pix_size, status=self.status)
@@ -406,9 +429,6 @@ class TargetGUI:
             self.model.pix_size = self.loaded_map.pix_size
             self.model.setDimensions(self.mic_params)
 
-        # Pre-generate overlays to remove lag when selecting first target
-        self.makeTargetOverlay()
-
         # Load targets
         self.status.update("Loading targets...", box=True)
         self.targets = Targets(map_dir=self.cur_dir, map_name=self.map_name, map_dims=self.loaded_map.img.shape, tgt_params=self.tgt_params, map_pix_size=self.loaded_map.pix_size)
@@ -436,15 +456,12 @@ class TargetGUI:
         # Show toggle target suggestions button
         if "grid_vectors" in self.loaded_map.meta_data.keys():
             self.toggleHolePattern(force_off=True)
-            dpg.show_item("butholes")
+            self.menu_icon.showElements(["butholes"])
         self.toggleDensePattern(force_off=True)
-        dpg.show_item("butdense")
-        dpg.bind_item_theme("butpolygon", None)
-        dpg.show_item("butpolygon")
+        dpg.bind_item_theme(self.menu_icon.all_elements["butpolygon"], None)
+        self.menu_icon.showElements(["butdense", "butpolygon"])
         if self.inspected:
-            dpg.hide_item("butholes")
-            dpg.hide_item("butdense")
-            dpg.hide_item("butpolygon")
+            self.menu_icon.hideElements(["butholes", "butdense", "butpolygon"])
 
         self.menu_left.show()
 
@@ -452,11 +469,6 @@ class TargetGUI:
 
     def preloadMap(self):
         """Preloads second map quietly."""
-
-        # Check if map was already preloaded
-        #if self.preloaded_data:
-        #    log(f"DEBUG: Map {self.preloaded_data['map'].file.stem} is already preloaded.")
-        #    return
 
         # Get next map
         if not self.map_name:
@@ -506,7 +518,7 @@ class TargetGUI:
             self.menu_right.show()
 
             # Reset save button
-            dpg.hide_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.hideElements(["butsave"])
 
     def loadOverlay(self, *args, cats=[]):
         """Plots overlay of selected categories."""
@@ -636,7 +648,7 @@ class TargetGUI:
             json.dump({"center_offset": center_offset_nm, "padding": padding, "restitch": restitch}, f, indent=4, default=utils.convertToTaggedString)
 
         log(f"DEBUG: Reacquire map {self.map_name} on next SPACEtomo run!")
-        gui.showInfoBox("INFO", "This map will be reacquired on the next SPACEtomo run. If you want to reacquire now, please stop the SPACEtomo run and start it again.")
+        InfoBoxManager.push(InfoBox("INFO", "This map will be reacquired on the next SPACEtomo run. If you want to reacquire now, please stop the SPACEtomo run and start it again.", loading=False))
 
         self.clearTargets()
         self.markInspected(None, None, None, keep_map=True)
@@ -656,7 +668,7 @@ class TargetGUI:
                           
         else:
             log(f"ERROR: Please select a tracking target to use as center of the reacquired map.")
-            gui.showInfoBox("ERROR", "Please select a tracking target to use as center of the reacquired map!")
+            InfoBoxManager.push(InfoBox("ERROR", "Please select a tracking target to use as center of the reacquired map!", loading=False))
 
     def applyClassSelection(self, sender, app_data, user_data):
         """Applies checked classes to target list."""
@@ -689,6 +701,8 @@ class TargetGUI:
     def showTargets(self):
         """Updates target overlays on plot."""
 
+        downscale_texture = 4  # Downscale factor for texture size to save memory, needs to be adjusted in gui.py => makeTargetOverlay
+
         # Skip rest if currently no targets
         if not self.targets and not self.targets.suggestions:
             return
@@ -699,13 +713,6 @@ class TargetGUI:
 
         # Adjust plot label
         self.plot.updateLabel(f"{self.map_name} [{len(self.targets)} targets]")
-
-        # Generate target overlay texture
-        if not self.target_overlays or not dpg.does_item_exist(self.target_overlays["target"]):
-            self.makeTargetOverlay()
-
-        # Get map dims
-        dims = np.flip(np.array(self.loaded_map.img.shape))
 
         # Add empty scatter series for legend
         if self.targets:
@@ -736,16 +743,42 @@ class TargetGUI:
                 self.plot.addSeries(points_beyond_limit[:, 0], points_beyond_limit[:, 1], label=f"Out of IS range", theme=f"limit_scatter_theme")
 
             # Go over all target points
-            scaled_overlay_dims = self.target_overlays["tgtdims"] * self.loaded_map.pix_size / 1000
             for p, (x, y) in enumerate(points):
-                # Show graphical overlays
-                bounds = ((x - scaled_overlay_dims[1] / 2, x + scaled_overlay_dims[1] / 2), (y - scaled_overlay_dims[0] / 2, y + scaled_overlay_dims[0] / 2))
-                if p == 0:
-                    self.plot.addOverlay(self.target_overlays["track"], bounds, label=f"tgt_{t}_{p}")
+
+                # Get overlay parameters for target type
+                if target_area.ld_areas[p] == "V":
+                    beam_diameter = self.mic_params.view_beam_diameter
+                    cam_dims = self.mic_params.cam_dims[[1, 0]] * self.mic_params.view_pix_size / 1000
+                    ta_rotation_fov = self.mic_params.view_ta_rotation
+                elif target_area.ld_areas[p] == "S":
+                    beam_diameter = self.mic_params.search_beam_diameter
+                    cam_dims = self.mic_params.cam_dims[[1, 0]] * self.mic_params.search_pix_size / 1000
+                    ta_rotation_fov = self.mic_params.search_ta_rotation
                 else:
-                    self.plot.addOverlay(self.target_overlays["target"], bounds, label=f"tgt_{t}_{p}")
+                    beam_diameter = self.mic_params.rec_beam_diameter
+                    cam_dims = self.mic_params.cam_dims[[1, 0]] * self.mic_params.rec_pix_size / 1000
+                    ta_rotation_fov = self.mic_params.rec_ta_rotation
+                if p == 0:
+                    fov_color = "#c92b27"
+                    prefix = "track"
+                else:
+                    fov_color = "#578abf"
+                    prefix = "tgt"
+
+                # Show graphical overlays
+                draw_node = self.plot.addDrawNode(label=f"{prefix}_{t}_{p}")
+                gui.drawTargetOverlay(draw_list=draw_node, 
+                                        center_coords=(x, y), 
+                                        beam_diameter=beam_diameter, 
+                                        cam_dims=cam_dims,
+                                        ta_rotation_beam=self.mic_params.view_ta_rotation,
+                                        ta_rotation_fov=ta_rotation_fov,
+                                        color_fov=fov_color,
+                                        max_tilt=self.tgt_params.max_tilt)
 
                 tgt_counter += 1
+            
+            
 
             if tgt_counter > 0 and len(target_area.geo_points) > 0:
                 # Transform geo coords to plot
@@ -753,11 +786,18 @@ class TargetGUI:
 
                 # Go over all geo points to draw overlays only for first area
                 if t == 0:
-                    scaled_overlay_dims = self.target_overlays["geodims"] * self.loaded_map.pix_size / 1000
                     for p, (x, y) in enumerate(points):
                         # Show graphical overlays
-                        bounds = ((x - scaled_overlay_dims[1] / 2, x + scaled_overlay_dims[1] / 2), (y - scaled_overlay_dims[0] / 2, y + scaled_overlay_dims[0] / 2))
-                        self.plot.addOverlay(self.target_overlays["geo"], bounds, label=f"geo_{t}_{p}")
+                        draw_node = self.plot.addDrawNode(label=f"geo_{t}_{p}")
+                        gui.drawTargetOverlay(draw_list=draw_node, 
+                                                center_coords=(x, y), 
+                                                beam_diameter=self.mic_params.focus_beam_diameter, 
+                                                cam_dims=self.mic_params.cam_dims[[1, 0]] * self.mic_params.focus_pix_size / 1000,
+                                                ta_rotation_beam=self.mic_params.view_ta_rotation,
+                                                ta_rotation_fov=self.mic_params.focus_ta_rotation,
+                                                color_beam="#ee8844",
+                                                color_fov="#ee8844",
+                                                max_tilt=0)
 
                         geo_counter += 1
 
@@ -766,11 +806,19 @@ class TargetGUI:
             # Transform geo coords to plot
             points = np.array([self.loaded_map.px2microns(point) for point in self.targets.suggestions])
 
-            scaled_overlay_dims = self.target_overlays["tgtdims"] * self.loaded_map.pix_size / 1000
             for p, (x, y) in enumerate(points):
                 # Show graphical overlays
-                bounds = ((x - scaled_overlay_dims[1] / 2, x + scaled_overlay_dims[1] / 2), (y - scaled_overlay_dims[0] / 2, y + scaled_overlay_dims[0] / 2))
-                self.plot.addOverlay(self.target_overlays["suggestion"], bounds, label=f"sug_{p}")
+                draw_node = self.plot.addDrawNode(label=f"sug_{p}")
+                gui.drawTargetOverlay(draw_list=draw_node, 
+                                        center_coords=(x, y), 
+                                        beam_diameter=self.mic_params.rec_beam_diameter, 
+                                        cam_dims=self.mic_params.cam_dims[[1, 0]] * self.mic_params.rec_pix_size / 1000,
+                                        ta_rotation_beam=self.mic_params.view_ta_rotation,
+                                        ta_rotation_fov=self.mic_params.rec_ta_rotation,
+                                        color_beam="#ffffff",
+                                        color_fov="#ffffff",
+                                        color_alpha=0.5,
+                                        max_tilt=self.tgt_params.max_tilt)
 
             # Show add suggestions button
             self.menu_right.unlockRows(["suggestions"])
@@ -862,9 +910,12 @@ class TargetGUI:
             if closest_point_id[1] > 0:
                 # Only show option when target is not a tracking target
                 dpg.configure_item(self.menu_tgt.all_elements["btn_trk"], user_data=closest_point_id)
-                dpg.show_item(self.menu_tgt.all_elements["btn_trk"])
+                self.menu_tgt.showElements(["btn_trk"])
             else:
-                dpg.hide_item(self.menu_tgt.all_elements["btn_trk"])
+                self.menu_tgt.hideElements(["btn_trk"])
+
+            # Configure LD area selection
+            dpg.configure_item(self.menu_tgt.all_elements["ld_area"], items=["R", "V", "S"], default_value=self.targets.areas[closest_point_id[0]].ld_areas[closest_point_id[1]], user_data=closest_point_id)
 
             # Configure area selection
             if len(self.targets.areas) > 1:
@@ -876,9 +927,9 @@ class TargetGUI:
             # Configure optimization button (only show when segmentation was loaded)
             if self.segmentation.valid:
                 dpg.configure_item(self.menu_tgt.all_elements["btn_opt"], user_data=closest_point_id)
-                dpg.show_item(self.menu_tgt.all_elements["btn_opt"])
+                self.menu_tgt.showElements(["btn_opt"])
             else:
-                dpg.hide_item(self.menu_tgt.all_elements["btn_opt"])
+                self.menu_tgt.hideElements(["btn_opt"])
 
             # Unlock rows
             self.menu_tgt.unlockRows(["info", "buttons"])
@@ -936,17 +987,15 @@ class TargetGUI:
 
         # Split areas button
         if len(self.targets) > 1:
-            dpg.show_item(self.menu_right.all_elements["butsplit"])
+            self.menu_right.showElements(["butsplit"])
         else:
-            dpg.hide_item(self.menu_right.all_elements["butsplit"])
+            self.menu_right.hideElements(["butsplit"])
 
         # Redistribute targets and merge buttons
         if len(self.targets.areas) > 1:
-            dpg.show_item(self.menu_right.all_elements["butdist"])
-            dpg.show_item(self.menu_right.all_elements["butmerge"])
+            self.menu_right.showElements(["butdist", "butmerge"])
         else:
-            dpg.hide_item(self.menu_right.all_elements["butdist"])
-            dpg.hide_item(self.menu_right.all_elements["butmerge"])
+            self.menu_right.hideElements(["butdist", "butmerge"])
 
     def openClassSelection(self, sender, app_data, user_data):
         """Opens selection window for classes."""
@@ -1018,7 +1067,7 @@ class TargetGUI:
 
         # Update GUI
         self.menu_left.show()
-        dpg.hide_item(self.menu_right.all_elements["butsave"])     # Only activate save button when targets were changed
+        self.menu_right.hideElements(["butsave"])   # Only activate save button when targets were changed
         if not self.inspected:
             self.menu_right.show()
         self.status.update()
@@ -1029,14 +1078,14 @@ class TargetGUI:
         # Show detected grid pattern
         if self.loaded_map and "grid_vectors" in self.loaded_map.meta_data.keys():
             if not self.targets:
-                dpg.bind_item_theme("butholes", None)
+                dpg.bind_item_theme(self.menu_icon.all_elements["butholes"], None)
                 self.hole_mode = False
-                gui.showInfoBox("ERROR", "Please select one target to center grid on!")
+                InfoBoxManager.push(InfoBox("ERROR", "Please select one target to center grid on!", loading=False))
                 return
             
             # Reset existing suggestions
             if len(self.targets.suggestions):
-                self.plot.clearOverlays(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))], delete_textures=False)
+                self.plot.clearDrawNodes(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))])
                 self.targets.suggestions = []
 
             # Load grid vectors
@@ -1096,16 +1145,16 @@ class TargetGUI:
         if self.hole_mode or force_off:
             log(f"DEBUG: Toggling hole mode OFF.")
             if self.targets is not None and len(self.targets.suggestions):
-                self.plot.clearOverlays(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))], delete_textures=False)
+                self.plot.clearDrawNodes(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))])
                 self.targets.suggestions = []
                 self.menu_right.lockRows(["suggestions"])
             self.hole_mode = False
-            dpg.bind_item_theme("butholes", None)
+            dpg.bind_item_theme(self.menu_icon.all_elements["butholes"], None)
         else:
             log(f"DEBUG: Toggling hole mode ON.")
             if self.dense_mode:
                 self.toggleDensePattern()
-            dpg.bind_item_theme("butholes", "active_btn_theme")
+            dpg.bind_item_theme(self.menu_icon.all_elements["butholes"], "active_btn_theme")
             self.hole_mode = True
             self.suggestHolePattern()
 
@@ -1197,16 +1246,16 @@ class TargetGUI:
         if self.dense_mode or force_off:
             log(f"DEBUG: Toggling dense mode OFF.")
             if self.targets is not None and len(self.targets.suggestions):
-                self.plot.clearOverlays(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))], delete_textures=False)
+                self.plot.clearDrawNodes(labels=[f"sug_{p}" for p in range(len(self.targets.suggestions))])
                 self.targets.suggestions = []
                 self.menu_right.lockRows(["suggestions"])
             self.dense_mode = False
-            dpg.bind_item_theme("butdense", None)
+            dpg.bind_item_theme(self.menu_icon.all_elements["butdense"], None)
         else:
             log(f"DEBUG: Toggling dense mode ON.")
             if self.hole_mode:
                 self.toggleHolePattern()
-            dpg.bind_item_theme("butdense", "active_btn_theme")
+            dpg.bind_item_theme(self.menu_icon.all_elements["butdense"], "active_btn_theme")
             self.dense_mode = True
             self.suggestDensePattern()
 
@@ -1221,7 +1270,7 @@ class TargetGUI:
         self.toggleDensePattern(force_off=True)
         self.showTargets()
         self.showTargetAreaButtons()
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
 
     def togglePolygonMode(self):
         """Toggles polygon mode for target selection."""
@@ -1231,7 +1280,7 @@ class TargetGUI:
         
         # Toggle mode
         self.polygon_mode = not self.polygon_mode
-        dpg.bind_item_theme("butpolygon", "active_btn_theme" if self.polygon_mode else None)
+        dpg.bind_item_theme(self.menu_icon.all_elements["butpolygon"], "active_btn_theme" if self.polygon_mode else None)
 
         # If turning off
         if not self.polygon_mode:
@@ -1259,12 +1308,6 @@ class TargetGUI:
 
         if abs(new_max_tilt - self.tgt_params.max_tilt) > 5:
             self.tgt_params.max_tilt = new_max_tilt
-
-            # Reset target overlays
-            for overlay in self.target_overlays:
-                if dpg.does_item_exist(overlay):
-                    dpg.delete_item(overlay)
-            self.target_overlays = {}
 
             if self.dense_mode:
                 # Update target suggestions
@@ -1296,6 +1339,19 @@ class TargetGUI:
             for area in self.targets.areas:
                 area.getClassScores(cat, self.segmentation.getMask([cat], unbinned=True))
 
+    def changeLDArea(self, sender, app_data, user_data):
+        """Changes LD area of single target."""
+
+        if user_data:
+            area_id, point_id = user_data
+            new_ld_area = dpg.get_value(sender)
+            self.targets.areas[area_id].ld_areas[point_id] = new_ld_area
+
+            dpg.hide_item("win_tgt")
+            self.showTargets()
+            # Enable save button
+            self.menu_right.showElements(["butsave"])
+
     def changeArea(self, sender, app_data, user_data):
         """Changes target area of single target."""
 
@@ -1306,22 +1362,23 @@ class TargetGUI:
         self.showTargets()
         self.showTargetAreaButtons()
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
         
     def makeTrackDialogue(self, sender, app_data, user_data):
         """Creates dialogue for make tracking target."""
 
         dpg.hide_item("win_tgt")
         dpg.split_frame()
-        gui.showInfoBox("Make tracking target", "Do you want to make this target the tracking target of the current area or create a new acquisition area?", callback=self.makeTrack, options=["Current area", "New area", "Cancel"], options_data=[[user_data, "old"], [user_data, "new"], False])
+        InfoBoxManager.push(InfoBox("Make tracking target", "Do you want to make this target the tracking target of the current area or create a new acquisition area?", loading=False, callback=self.makeTrack, options=["Current area", "New area", "Cancel"], options_data=[[user_data, "old"], [user_data, "new"], False]))
 
     def makeTrack(self, sender, app_data, user_data):
         """Makes selected target a tracking target of current or new area."""
 
         # Check for info box input
         if user_data and dpg.does_item_exist(user_data[0]):
-            dpg.delete_item(user_data[0])
-            dpg.split_frame()
+            #dpg.delete_item(user_data[0])
+            #dpg.split_frame()
+            InfoBoxManager.pop()
         
         if not user_data[1]:
             return
@@ -1333,6 +1390,10 @@ class TargetGUI:
             # Get coords
             coords = self.targets.areas[area_id].points[point_id]
 
+            # Get data
+            score = self.targets.areas[area_id].scores[point_id]
+            ld_area = self.targets.areas[area_id].ld_areas[point_id]
+
             # Remove point from old area
             self.targets.areas[area_id].removePoint(point_id)
             
@@ -1341,7 +1402,7 @@ class TargetGUI:
                 self.targets.areas.pop(area_id)
             
             # Create new area with point
-            self.targets.addTarget(coords, new_area=True)
+            self.targets.addTarget(coords, new_area=True, ld_area=ld_area)
             log("NOTE: Created new acquisition area!")
         else:
             # Move point to beginning of area
@@ -1351,7 +1412,7 @@ class TargetGUI:
         self.showTargets()
         self.showTargetAreaButtons()
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
 
     def optimizeTarget(self, sender, app_data, user_data):
         """Translates target according to loaded target mask."""
@@ -1368,7 +1429,7 @@ class TargetGUI:
             dpg.hide_item("win_tgt")
             self.showTargets()
             # Enable save button
-            dpg.show_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.showElements(["butsave"])
 
     def removeTarget(self, sender, app_data, user_data):
         """Deletes a single target."""
@@ -1386,7 +1447,7 @@ class TargetGUI:
                 self.clearTargets()
             self.showTargetAreaButtons()
             # Enable save button
-            dpg.show_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.showElements(["butsave"])
 
     def removeGeoPoint(self, img_coords):
         """Deletes closest geo point from all target areas. (Assumes geo_points are kept synced for all target areas.)"""
@@ -1400,7 +1461,7 @@ class TargetGUI:
             # Remove geo point from all areas
             self.targets.removeGeoPoint(closest_point_id)
             self.showTargets()
-            dpg.show_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.showElements(["butsave"])
 
     def removePolygon(self, sender=None, app_data=None, user_data=None, img_coords=None):
         """Deletes closest polygon from plot."""
@@ -1416,12 +1477,13 @@ class TargetGUI:
             if inside_polygons: 
                 _, p = sorted(inside_polygons, key=lambda x: x[0])[0]
                 self.plot.boxes[p].updateColor(gui.COLORS["error"])
-                gui.showInfoBox("Delete polygon", "Do you want to delete this polygon?", callback=self.removePolygon, options=["Delete", "Cancel"], options_data=[[True, p], [False, p]])
+                InfoBoxManager.push(InfoBox("Delete polygon", "Do you want to delete this polygon?", loading=False, callback=self.removePolygon, options=["Delete", "Cancel"], options_data=[[True, p], [False, p]]))
             return
             
         if user_data and dpg.does_item_exist(user_data[0]):
-            dpg.delete_item(user_data[0])
-            dpg.split_frame()
+            #dpg.delete_item(user_data[0])
+            #dpg.split_frame()
+            InfoBoxManager.pop()
 
             # Get info from user_data
             remove, p = user_data[1]
@@ -1444,7 +1506,7 @@ class TargetGUI:
         self.showTargets()
         self.showTargetAreaButtons()
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
 
     def splitAreas(self):
         """Splits targets into target areas using k-means clustering."""
@@ -1456,7 +1518,7 @@ class TargetGUI:
         self.showTargets()
         self.showTargetAreaButtons()
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
 
     def splitTargets(self):
         """Splits all targets among current tracking targets."""
@@ -1466,18 +1528,16 @@ class TargetGUI:
         self.showTargets()
         self.showTargetAreaButtons()
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])        
+        self.menu_right.showElements(["butsave"])      
 
     def clearTargets(self, *args, plot_only=False):
         """Deletes all targets (or just clear from plot.)"""
 
         # Clear targets from plot
-        self.plot.clearOverlays(delete_textures=not plot_only)
+        self.plot.clearDrawNodes()
         self.plot.clearDragPoints()
         self.plot.clearSeries(skip_labels=["tilt_axis"])#labels=self.plot.getSeriesByKeyword("geo") + self.plot.getSeriesByKeyword("tgt") + [""])
         if not plot_only:
-            # Release target overlay textures
-            self.target_overlays = {}
             # Reinitialize targets object
             self.targets = Targets(map_dir=self.cur_dir, map_name=self.map_name, map_dims=self.loaded_map.img.shape, tgt_params=self.tgt_params, map_pix_size=self.loaded_map.pix_size)
             log("NOTE: Deleted targets!")
@@ -1488,13 +1548,13 @@ class TargetGUI:
             self.toggleDensePattern(force_off=True)
 
             # Enable save button
-            dpg.show_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.showElements(["butsave"])
 
     def clearGeoPoints(self):
         """Deletes all geo points."""
 
         # Clear all items with "geo" labels (needs empty list entry, otherwise all items will be cleared in case of no hits)
-        self.plot.clearOverlays(labels=self.plot.getOverlaysByKeyword("geo") + [""], delete_textures=False)
+        self.plot.clearDrawNodes(labels=self.plot.getOverlaysByKeyword("geo") + [""])
         self.plot.clearDragPoints(labels=self.plot.getDragPointsByKeyword("geo") + [""])
         self.plot.clearSeries(labels=self.plot.getSeriesByKeyword("geo") + [""])
 
@@ -1502,7 +1562,7 @@ class TargetGUI:
         log("NOTE: Deleted geo points!")
 
         # Enable save button
-        dpg.show_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.showElements(["butsave"])
 
     def saveTargets(self):
         """Exports targets as json file."""
@@ -1511,7 +1571,7 @@ class TargetGUI:
         settings = self.getAcquisitionSettings()
 
         self.targets.exportTargets(settings)
-        dpg.hide_item(self.menu_right.all_elements["butsave"])
+        self.menu_right.hideElements(["butsave"])
         log("NOTE: Saved targets!")
 
         # Also check FLM and save
@@ -1523,12 +1583,13 @@ class TargetGUI:
         # Check for geo_points
         if self.targets and len(self.targets.areas[0].points) and not len(self.targets.areas[0].geo_points) and not user_data:
             log(f"WARNING: No geo points were selected!")
-            gui.showInfoBox("WARNING", "No geo points were selected to measure the sample geometry. If you go ahead, the manual input for pretilt and rotation will be used!", callback=self.markInspected, options=["Continue", "Cancel"], options_data=[True, False])
+            InfoBoxManager.push(InfoBox("WARNING", "No geo points were selected to measure the sample geometry. If you go ahead, the manual input for pretilt and rotation will be used!", loading=False, callback=self.markInspected, options=["Continue", "Cancel"], options_data=[True, False]))
             return
         # Close geo_points confirmation info box
         if user_data and dpg.does_item_exist(user_data[0]):
-            dpg.delete_item(user_data[0])
-            dpg.split_frame()
+            #dpg.delete_item(user_data[0])
+            #dpg.split_frame()
+            InfoBoxManager.pop()
             # Cancel
             if not user_data[1]:
                 return
@@ -1577,7 +1638,7 @@ class TargetGUI:
             log("NOTE: All MM maps were inspected!")
             if self.auto_close:
                 # Confirm closing
-                gui.showInfoBox("FINISHED?", "All available MM maps were inspected. Are MM maps still being acquired? If not, you can close this GUI.", callback=self.closeAllInspected, options=["Wait", "Close"], options_data=[False, True])
+                InfoBoxManager.push(InfoBox("FINISHED?", "All available MM maps were inspected. Are MM maps still being acquired? If not, you can close this GUI.", loading=False, callback=self.closeAllInspected, options=["Wait", "Close"], options_data=[False, True]))
                 return True
         else:
             return False
@@ -1591,8 +1652,9 @@ class TargetGUI:
         else:
             # Close confirmation info box
             if dpg.does_item_exist(user_data[0]):
-                dpg.delete_item(user_data[0])
-                dpg.split_frame()        
+                #dpg.delete_item(user_data[0])
+                #dpg.split_frame()
+                InfoBoxManager.pop()
 
     def getAcquisitionSettings(self):
         """Gets acquisition settings from input fields."""
@@ -1634,14 +1696,14 @@ class TargetGUI:
                 log("ERROR: No microscope parameter file found. Please launch the GUI in a SPACE_maps folder!")
                 # Change exit callback to avoid askForSave method
                 dpg.set_exit_callback(dpg.stop_dearpygui)
-                gui.showInfoBox("ERROR", "No microscope parameter file found.\nPlease launch the GUI in a SPACE_maps folder!", callback=dpg.stop_dearpygui)
+                InfoBoxManager.push(InfoBox("ERROR", "No microscope parameter file found.\nPlease launch the GUI in a SPACE_maps folder!", loading=False, callback=dpg.stop_dearpygui))
             self.checked_run_conditions = True
             return
 
         # Create popup if no maps have been found yet
         if not self.map_list:
             if not self.checked_map_files:
-                gui.showInfoBox("NOTE", "No MM map segmentations are available yet.\n\nReload after a few minutes to check for MM map segmentations.", callback=self.manualMapListReload, options=["Reload", "Close"], options_data=[True, False])
+                InfoBoxManager.push(InfoBox("NOTE", "No MM map segmentations are available yet.\n\nReload after a few minutes to check for MM map segmentations.", loading=False, callback=self.manualMapListReload, options=["Reload", "Close"], options_data=[True, False]))
             self.checked_map_files = True
             return
 
@@ -1658,8 +1720,9 @@ class TargetGUI:
 
         # Close info box
         if dpg.does_item_exist(user_data[0]):
-            dpg.delete_item(user_data[0])
-            dpg.split_frame()
+            #dpg.delete_item(user_data[0])
+            #dpg.split_frame()
+            InfoBoxManager.pop()
 
         if user_data[1]:
             self.updateMapList()
@@ -1668,94 +1731,14 @@ class TargetGUI:
                 self.checked_map_files = False
         else:
             dpg.stop_dearpygui()
-
-    def makeTargetOverlay(self):
-        """Generates target overlay textures."""
-
-        # Return early if target overlays already exist
-        if self.target_overlays:
-            return
-
-        # TGT
-        # Get camera dims
-        rec_beam_diameter_px = self.mic_params.rec_beam_diameter * 1000 / self.loaded_map.pix_size
-        rec_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.rec_pix_size / self.loaded_map.pix_size).astype(int) 
-
-        # Create canvas with size of stretched beam diameter
-        tgt_overlay = np.zeros([int(rec_beam_diameter_px), int(rec_beam_diameter_px / np.cos(np.radians(self.tgt_params.max_tilt)))])
-        canvas = Image.fromarray(tgt_overlay).convert('RGB')
-        draw = ImageDraw.Draw(canvas)
-
-        # Draw beam
-        draw.ellipse((0, 0, tgt_overlay.shape[1] - 1, tgt_overlay.shape[0] - 1), outline="#ffd700", width=20)
-        #draw.ellipse(((tgt_overlay.shape[1] - tgt_overlay.shape[0]) / 2, 0, (tgt_overlay.shape[1] + tgt_overlay.shape[0]) / 2 - 1, tgt_overlay.shape[0] - 1), outline="#ffd700", width=20)
-
-        # Rotate tilt axis
-        canvas = canvas.rotate(-self.mic_params.view_ta_rotation, expand=True)
-
-        # Draw camera outline
-        rect = ((canvas.width - rec_dims[1]) // 2, (canvas.height - rec_dims[0]) // 2, (canvas.width + rec_dims[1]) // 2, (canvas.height + rec_dims[0]) // 2)
-        draw = ImageDraw.Draw(canvas)
-        draw.rectangle(rect, outline="#578abf", width=20)
-
-        # Convert to array
-        tgt_overlay = np.array(canvas).astype(float) / 255
-
-        # Draw camera outline for tracking target
-        draw.rectangle(rect, outline="#c92b27", width=20)
-
-        # Convert to array
-        trk_overlay = np.array(canvas).astype(float) / 255
-
-        # Draw in grey scale for target suggestions
-        sug_overlay = np.zeros((canvas.height, canvas.width, 3))
-        mask = np.array(canvas.convert('L')) > 0
-        sug_overlay[mask] = [1, 1, 1]
-
-        # GEO
-        # Get camera dims
-        focus_beam_diameter_px = self.mic_params.focus_beam_diameter * 1000 / self.loaded_map.pix_size
-        focus_dims = (self.mic_params.cam_dims[[1, 0]] * self.mic_params.focus_pix_size / self.loaded_map.pix_size).astype(int) 
-
-        # Create canvas for geo with non-stretched beam diameter
-        geo_overlay = np.zeros([int(focus_beam_diameter_px), int(focus_beam_diameter_px)])
-        canvas = Image.fromarray(geo_overlay).convert('RGB')
-        draw = ImageDraw.Draw(canvas)
-
-        # Draw beam and camera dims
-        draw.ellipse((0, 0, geo_overlay.shape[1] - 1, geo_overlay.shape[0] - 1), outline="#ee8844", width=20)
-        rect = ((canvas.width - focus_dims[1]) // 2, (canvas.height - focus_dims[0]) // 2, (canvas.width + focus_dims[1]) // 2, (canvas.height + focus_dims[0]) // 2)
-        draw.rectangle(rect, outline="#ee8844", width=20)
-
-        # Convert to array
-        geo_overlay = np.array(canvas).astype(float) / 255
-
-        # Make textures
-        self.target_overlays["tgtdims"] = np.array(tgt_overlay.shape)[:2]
-        alpha = np.zeros(tgt_overlay.shape[:2])
-        alpha[np.sum(tgt_overlay, axis=-1) > 0] = 1
-        tgt_overlay_image = np.ravel(np.dstack([tgt_overlay, alpha]))
-        trk_overlay_image = np.ravel(np.dstack([trk_overlay, alpha]))
-        sug_overlay_image = np.ravel(np.dstack([sug_overlay, alpha * 0.25]))
-
-        self.target_overlays["geodims"] = np.array(geo_overlay.shape)[:2]
-        alpha = np.zeros(geo_overlay.shape[:2])
-        alpha[np.sum(geo_overlay, axis=-1) > 0] = 1
-        geo_overlay_image = np.ravel(np.dstack([geo_overlay, alpha]))
-
-        with dpg.texture_registry():
-            self.target_overlays["target"] = dpg.add_static_texture(width=int(self.target_overlays["tgtdims"][1]), height=int(self.target_overlays["tgtdims"][0]), default_value=tgt_overlay_image)
-            self.target_overlays["track"] = dpg.add_static_texture(width=int(self.target_overlays["tgtdims"][1]), height=int(self.target_overlays["tgtdims"][0]), default_value=trk_overlay_image)
-            self.target_overlays["geo"] = dpg.add_static_texture(width=int(self.target_overlays["geodims"][1]), height=int(self.target_overlays["geodims"][0]), default_value=geo_overlay_image)
-            self.target_overlays["suggestion"] = dpg.add_static_texture(width=int(self.target_overlays["tgtdims"][1]), height=int(self.target_overlays["tgtdims"][0]), default_value=sug_overlay_image)
-
+            
     def savePlot(self, sender, app_data, user_data):
         """Gets frame buffer to save plot to file. (Does not work on MacOS.)"""
 
         # Check if map was opened
         if not self.map_name:
             log(f"ERROR: Please load a map before saving a snapshot!")
-            gui.showInfoBox("WARNING", "Please load a map before saving a snapshot!")
+            InfoBoxManager.push(InfoBox("WARNING", "Please load a map before saving a snapshot!"))
             return
         
         # Get name for snapshot
@@ -1763,14 +1746,14 @@ class TargetGUI:
         while (snapshot_file_path := self.cur_dir / f"{self.map_name}_snapshot{counter}.png").exists():
             counter += 1
         
-        gui.saveSnapshot(self.plot.plot, snapshot_file_path)
+        saveSnapshot(self.plot.plot, snapshot_file_path)
 
     def askForSave(self):
         """Opens popup if there are unsaved changes."""
 
         # Check for unsaved changes
         if dpg.is_item_shown(self.menu_right.all_elements["butsave"]):
-            gui.showInfoBox("WARNING", "There are unsaved changes to your targets!", callback=self.saveAndClose, options=["Save", "Discard"], options_data=[True, False])
+            InfoBoxManager.push(InfoBox("WARNING", "There are unsaved changes to your targets!", loading=False, callback=self.saveAndClose, options=["Save", "Discard"], options_data=[True, False]))
         else:
 
             # Check inspected status and give warning when some but not all targets have been inspected
@@ -1778,7 +1761,7 @@ class TargetGUI:
             for map_name in self.map_list:
                 inspected.append((self.cur_dir / (map_name + "_inspected.txt")).exists())
             if any(inspected) and not all(inspected):
-                gui.showInfoBox("WARNING", "Not all targets have been marked as inspected. Are you sure you want to exit?", callback=self.confirmClose, options=["Exit", "Cancel"], options_data=[True, False])
+                InfoBoxManager.push(InfoBox("WARNING", "Not all targets have been marked as inspected. Are you sure you want to exit?", loading=False, callback=self.confirmClose, options=["Exit", "Cancel"], options_data=[True, False]))
             else:
                 dpg.stop_dearpygui()
 
@@ -1801,12 +1784,13 @@ class TargetGUI:
             self.saveTargets()
         else:
             # Discard by hiding save button
-            dpg.hide_item(self.menu_right.all_elements["butsave"])
+            self.menu_right.hideElements(["butsave"])
 
         # Close info box
         if dpg.does_item_exist(user_data[0]):
-            dpg.delete_item(user_data[0])
-            dpg.split_frame()
+            #dpg.delete_item(user_data[0])
+            #dpg.split_frame()
+            InfoBoxManager.pop()
 
     def confirmClose(self, sender, app_data, user_data):
         """Closes GUI or keeps it open."""
@@ -1818,14 +1802,16 @@ class TargetGUI:
         else:
             # Close info box
             if dpg.does_item_exist(user_data[0]):
-                dpg.delete_item(user_data[0])
-                dpg.split_frame()
+                #dpg.delete_item(user_data[0])
+                #dpg.split_frame()
+                InfoBoxManager.pop()
 
     def toggleAdvanced(self):
         """Shows advanced menu options."""
 
         self.menu_left.toggleAdvanced()
         self.menu_right.toggleAdvanced()
+        self.menu_tgt.toggleAdvanced()
 
     def triggerShowHelp(self):
         """Triggers show help once."""
@@ -1834,6 +1820,7 @@ class TargetGUI:
             dpg.delete_item("trigger_help")
 
         # Show help
+        dpg.split_frame()
         self.showHelp()
 
     def openWGMap(self):
@@ -1865,7 +1852,7 @@ class TargetGUI:
         message += "T     Toggle CLEM overlay\n"
         message += "Space Show available maps\n"
 
-        gui.showInfoBox("Help", message)
+        InfoBoxManager.push(InfoBox("Help", message, loading=False))
 
 #################################################################################
 
@@ -1875,6 +1862,9 @@ class TargetGUI:
 
         # Automatically close GUI after map was inspected
         self.auto_close = auto_close
+
+        # Keep list of popup blocking windows
+        self.blocking_windows = []
 
         # Make logo
         self.logo_dims = gui.makeLogo()
@@ -1894,7 +1884,7 @@ class TargetGUI:
         self.drag_start = None # Keep track of drag start position
 
         self.executor = concurrent.futures.ThreadPoolExecutor()
-        self.preloaded_data = None  # Map data to be preloaded
+        self.preloaded_data = None      # Map data to be preloaded
 
         # Modes
         self.polygon_mode = False   # Mode to draw polygons
@@ -1917,7 +1907,6 @@ class TargetGUI:
         self.loaded_map = None                      # MMap object
         self.overlay = []                           # Classes currently shown in overlay
         self.targets = None                         # Targets object containing points, scores and geo_points for all areas 
-        self.target_overlays = {}                   # Textures for target overlays
         self.map_list_tgtnum = []                   # List of target numbers for each map
         self.inspected = False                      # Inspection state of current map
 
@@ -2112,31 +2101,18 @@ class TargetGUI:
                         self.menu_left.addButton(tag="clsmask", label="Create overlay", callback=self.loadOverlay, tooltip="Create overlay of selected classes. (This can take a few seconds.)")
                         self.menu_left.addButton(tag="clsapply", label="Apply", callback=self.applyClassSelection, user_data=[self.menu_left, None], tooltip="Apply selected classes to target list.")
 
-                        self.status = gui.StatusLine()
+                        self.status = StatusLine()
 
                     with dpg.table_cell(tag="tblplot"):
-                        with dpg.group(horizontal=True):
-                            dpg.add_text(default_value="MM map", color=gui.COLORS["heading"])
 
-                            dpg.add_image_button(gui.makeIconResetZoom(), callback=self.plot.resetZoom, tag="butresetzoom")
-                            with dpg.tooltip("butresetzoom", delay=0.5):
-                                dpg.add_text("Reset zoom")
-
-                            dpg.add_image_button(gui.makeIconSnapshot(), callback=self.savePlot, tag="butsnapshot")
-                            with dpg.tooltip("butsnapshot", delay=0.5):
-                                dpg.add_text("Save snapshot")
-
-                            dpg.add_image_button(gui.makeIconHoles(), callback=self.toggleHolePattern, tag="butholes", show=False)
-                            with dpg.tooltip("butholes", delay=0.5):
-                                dpg.add_text("Show hole pattern")
-
-                            dpg.add_image_button(gui.makeIconDense(), callback=self.toggleDensePattern, tag="butdense", show=False)
-                            with dpg.tooltip("butdense", delay=0.5):
-                                dpg.add_text("Show dense pattern")
-
-                            dpg.add_image_button(gui.makeIconPolygon(), callback=self.togglePolygonMode, tag="butpolygon", show=False)
-                            with dpg.tooltip("butpolygon", delay=0.5):
-                                dpg.add_text("Draw polygon")
+                        self.menu_icon = Menu(outline=False)
+                        self.menu_icon.newRow(tag="icon", horizontal=True, separator=False, locked=False)
+                        self.menu_icon.addText(tag="icon_heading", value="MM map", color=gui.COLORS["heading"])
+                        self.menu_icon.addImageButton("butresetzoom", gui.makeIconResetZoom(), callback=self.plot.resetZoom, tooltip="Reset zoom")
+                        self.menu_icon.addImageButton("butsnapshot", gui.makeIconSnapshot(), callback=self.savePlot, tooltip="Save snapshot")
+                        self.menu_icon.addImageButton("butholes", gui.makeIconHoles(), callback=self.toggleHolePattern, tooltip="Show hole pattern", show=False)
+                        self.menu_icon.addImageButton("butdense", gui.makeIconDense(), callback=self.toggleDensePattern, tooltip="Show dense pattern", show=False)
+                        self.menu_icon.addImageButton("butpolygon", gui.makeIconPolygon(), callback=self.togglePolygonMode, tooltip="Draw polygon", show=False)
 
                         self.plot.makePlot(x_axis_label="x [µm]", y_axis_label="y [µm]", width=-1, height=-1, equal_aspects=True, no_menus=True, crosshairs=True, pan_button=dpg.mvMouseButton_Right, no_box_select=True)
 
@@ -2238,17 +2214,21 @@ class TargetGUI:
         # Make window for map thumbnails
         self.map_window = MapWindow(self.cur_dir, self.map_name, self.map_list, self.map_list_tgtnum, self.selectMap, self.thumbnail_size, self.executor)
         self.map_window.makeMapTable()
+        self.blocking_windows.append(self.map_window.map_window) # Add to blocking windows to keep track of open popups
 
         # LM window
         self.lm_window = FlmWindow(self.plot)
 
         # Make window for target editing menu
-        with dpg.window(label="Target", tag="win_tgt", no_scrollbar=True, no_scroll_with_mouse=True, popup=True, show=False):
+        with dpg.window(label="Target", tag="win_tgt", no_scrollbar=True, no_scroll_with_mouse=True, popup=True, show=False) as win_tgt:
             self.menu_tgt = Menu()
             self.menu_tgt.newRow(tag="heading", separator=False, locked=False)
             self.menu_tgt.addText(tag="heading_txt", value="Target", color=gui.COLORS["heading"])
             self.menu_tgt.newRow(tag="info", separator=False)
             self.menu_tgt.addText(tag="info_txt")
+
+            self.menu_tgt.newRow(tag="ld_area", locked=False, advanced=True)
+            self.menu_tgt.addCombo(tag="ld_area", label="Low Dose Area", callback=self.changeLDArea, width=30)
             
             self.menu_tgt.newRow(tag="area", horizontal=True, separator=False)
             self.menu_tgt.addCombo(tag="area", label="Target area", callback=self.changeArea, width=30)
@@ -2257,9 +2237,10 @@ class TargetGUI:
             self.menu_tgt.addButton(tag="btn_del", label="Delete", callback=self.removeTarget)
             self.menu_tgt.addButton(tag="btn_trk", label="Make tracking target", callback=self.makeTrackDialogue)
             self.menu_tgt.addButton(tag="btn_opt", label="Optimize position", callback=self.optimizeTarget)
+        self.blocking_windows.append(win_tgt) # Add to blocking windows to keep track of open popups
 
         # Make window for class list selection
-        with dpg.window(label="Selection", tag="win_sel", no_scrollbar=True, no_scroll_with_mouse=True, popup=True, show=False):
+        with dpg.window(label="Selection", tag="win_sel", no_scrollbar=True, no_scroll_with_mouse=True, popup=True, show=False) as win_sel:
             self.menu_sel = Menu()
             self.menu_sel.newRow(tag="heading", separator=False, locked=False)
             self.menu_sel.addText(tag="heading", value="Classes", color=gui.COLORS["heading"])
@@ -2268,6 +2249,9 @@ class TargetGUI:
                     if k % 3 == 0:
                         self.menu_sel.newRow(tag=str(k), horizontal=True, separator=False, locked=False)
                     self.menu_sel.addCheckbox(tag=key, label=key, value=False, callback=self.applyClassSelection)
+        self.blocking_windows.append(win_sel) # Add to blocking windows to keep track of open popups
+
+        InfoBoxManager.blocking_windows = self.blocking_windows
 
         dpg.bind_theme("global_theme")
 
@@ -2283,20 +2267,26 @@ class TargetGUI:
             # Recheck folder for segmentation every minute
             now = time.time()
             if now > next_update:
-                next_update = now + 10
+                next_update = now + 1
+
+                # Check if info box needs to be shown
+                InfoBoxManager.unblock()
+
                 # Check if new maps (or thumbnails) were finished
                 if self.updateMapList() or (any([future.done() for future in self.map_window.futures])):
                     self.map_window.update(self.map_name, self.map_list, self.map_list_tgtnum)
+
                 # Check if new target selection was finished
                 self.checkPointFiles()
+
                 # Preload map in background
-                if self.preload_maps:
+                if self.preload_maps and self.map_list:
                     # If preloading is in progress, check if it is done
                     if isinstance(self.preloaded_data, concurrent.futures.Future):
                         if self.preloaded_data.done():
                             self.preloaded_data = self.preloaded_data.result()
-                    # If no preloading is done or in progress, start new one
-                    elif self.preloaded_data is None:
+                    # If no preloading is done or in progress (and no status is set, e.g. map is loading), start new one
+                    elif self.preloaded_data is None and not self.status.status:
                         self.preloaded_data = self.executor.submit(self.preloadMap)
 
             dpg.render_dearpygui_frame()

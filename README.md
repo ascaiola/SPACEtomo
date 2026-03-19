@@ -506,7 +506,8 @@ SPACEtomo on the SerialEM computer will keep checking the map dir for new coordi
 
 ## Video Tutorials
 
-[![SPACE-tomo: Target Selection GUI](https://github.com/eisfabian/SPACEtomo/raw/main/img/SPACE_tut_thumbnail_tgt.png)](https://www.youtube.com/watch?v=I5yvi0sUGG4)
+[![SPACEtomo: Target Selection GUI](https://github.com/eisfabian/SPACEtomo/raw/main/img/SPACE_tut_thumbnail_tgt.png)](https://www.youtube.com/watch?v=I5yvi0sUGG4)
+[![SPACEtomo: Full run on lamella sample](https://github.com/eisfabian/SPACEtomo/raw/main/img/SPACE_tut_thumbnail_run_lam.png)](https://www.youtube.com/watch?v=640jxdV8bfA)
 
 More coming as soon as possible!
 
@@ -515,7 +516,7 @@ More coming as soon as possible!
 In general, if you run into any crashes or problems, please turn on debug output using `SPACEconfig debug` in a command prompt with activated SPACEtomo virtual environment. Then run SPACEtomo again and include the SerialEM log file when you report the issue!
 
 Here are some common problems that might occur:
-
+- If you get an error while opening the GUI saying: `Windows fatal exception: access violation`, please try to install the latest Visual C++ Redistributables (Thanks, Sebastian Unger!)
 - The lamella MM map has a stitching error (e.g. one tile duplicated to a different spot). Use the `Reacquire` option in the GUI and check `Just restitch map`. SPACEtomo will attempt to restitch the map on the next run.
 - In case your lamella montages don't stitch properly, you might need to experiment with the SerialEM montage settings and with the overlap factors in the SPACEtomo config. Redoing the *High Defocus Mag* calibration might also help.
 - If SPACEtomo freezes or crashes when loading an image from the SerialEM buffer, please try just running it again. This issue should be fixed in the latest SerialEM 4.2beta+.

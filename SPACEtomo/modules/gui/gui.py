@@ -6,7 +6,8 @@
 # Author:       Fabian Eisenstein
 # Created:      2024/04/26
 # Revision:     v1.3
-# Last Change:  2025/03/14: added dense pattern icon
+# Last Change:  2025/08/24: finalized new target overlay draw function
+#               2025/03/14: added dense pattern icon
 #               2025/03/07: added more icons, added toggled button theme
 #               2024/12/20: added arrow icons for cursor
 #               2024/11/20: added a variety of icons, removed static tag from info box
@@ -27,12 +28,10 @@
 import time
 import numpy as np
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 from skimage import transform, draw
 import dearpygui.dearpygui as dpg
-
-from SPACEtomo.modules.utils import log
 
 ### GUI CONFIG ###
 
@@ -67,6 +66,23 @@ def configureGlobalTheme():
         with dpg.theme_component(dpg.mvImageButton):
             dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5, category=dpg.mvThemeCat_Core)
             dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 5, 5)
+
+        with dpg.theme_component(dpg.mvButton, enabled_state=False):
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5, category=dpg.mvThemeCat_Core)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 5, 5)
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (32, 32, 32, 255), category=dpg.mvThemeCat_Core)
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (32, 32, 32, 255), category=dpg.mvThemeCat_Core)
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, COLORS["error"], category=dpg.mvThemeCat_Core)
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (64, 64, 64, 255), category=dpg.mvThemeCat_Core)  
+
+        # Checkboxes
+        with dpg.theme_component(dpg.mvCheckbox):
+            #dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (32, 32, 32, 255), category=dpg.mvThemeCat_Core)
+            dpg.add_theme_color(dpg.mvThemeCol_CheckMark, COLORS["heading"], category=dpg.mvThemeCat_Core)
+        with dpg.theme_component(dpg.mvCheckbox, enabled_state=False):
+            dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (32, 32, 32, 255), category=dpg.mvThemeCat_Core)
+            dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (64, 64, 64, 255), category=dpg.mvThemeCat_Core)
+
 
     # Theme for large buttons
     with dpg.theme(tag="large_btn_theme"):
@@ -133,6 +149,73 @@ def makeLogo(radius=100, stroke=3, oversampling=2):
         dpg.add_static_texture(width=logo_dims[1], height=logo_dims[0], default_value=logo, tag="logo")
 
     return logo_dims
+
+def drawTargetOverlay(draw_list, center_coords, beam_diameter, cam_dims, ta_rotation_beam, ta_rotation_fov, color_beam="#ffd700", color_fov="#578abf", color_alpha=1, max_tilt=60):
+    """Draws target overlay using dpg.draw_list commands at specified position and scale."""
+    
+    # Convert hex colors to RGBA tuples for DearPyGui
+    def hex_to_rgba(hex_color, alpha=1.0):
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16) 
+        b = int(hex_color[4:6], 16)
+        return (r, g, b, int(255 * alpha))
+
+    # Extract parameters
+    beam_height = beam_diameter / np.cos(np.radians(max_tilt))
+    beam_color = hex_to_rgba(color_beam, color_alpha)
+    fov_color = hex_to_rgba(color_fov, color_alpha)
+    thickness = 0.05 # Adjustable line thickness
+    
+    
+    # Helper function to rotate point around center
+    def rotate_point(px, py, cx, cy, angle_deg):
+        angle_rad = np.radians(angle_deg - 90)
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        dx, dy = px - cx, py - cy
+        rx = dx * cos_a - dy * sin_a + cx
+        ry = dx * sin_a + dy * cos_a + cy
+        return rx, ry
+    
+    # Draw beam ellipse (stretched by max_tilt)
+    beam_rx = beam_diameter / 2
+    beam_ry = beam_height / 2
+    
+    # Create ellipse points for beam
+    num_segments = 32
+    beam_points = []
+    for i in range(num_segments):
+        angle = 2 * np.pi * i / num_segments
+        px = center_coords[0] + beam_rx * np.cos(angle)
+        py = center_coords[1] + beam_ry * np.sin(angle)
+        # Rotate by tilt axis rotation for FOV
+        px, py = rotate_point(px, py, center_coords[0], center_coords[1], -ta_rotation_beam)
+        beam_points.append([px, py])
+    
+    # Draw beam outline
+    dpg.draw_polyline(beam_points, closed=True, color=beam_color, thickness=thickness, parent=draw_list)
+    
+    # Draw camera rectangle
+    cam_half_w = cam_dims[1] / 2
+    cam_half_h = cam_dims[0] / 2
+    
+    # Rectangle corners
+    rect_corners = [
+        (center_coords[0] - cam_half_w, center_coords[1] - cam_half_h),
+        (center_coords[0] + cam_half_w, center_coords[1] - cam_half_h),
+        (center_coords[0] + cam_half_w, center_coords[1] + cam_half_h),
+        (center_coords[0] - cam_half_w, center_coords[1] + cam_half_h)
+    ]
+    
+    # Rotate rectangle by FOV tilt axis, then by difference
+    total_rotation = - (ta_rotation_beam - ta_rotation_fov) + 90
+    rotated_corners = []
+    for px, py in rect_corners:
+        rx, ry = rotate_point(px, py, center_coords[0], center_coords[1], total_rotation)
+        rotated_corners.append([rx, ry])
+    
+    # Draw camera outline
+    dpg.draw_polyline(rotated_corners, closed=True, color=fov_color, thickness=thickness, parent=draw_list)
 
 def makeIconRotation(ccw=False):
     """Makes clockwise arrow icon."""
@@ -747,139 +830,25 @@ def makeIco():
 
     return logo_center
 
-def window_size_change(logo_dims):
-    # Update items anchored to side of window
-    dpg.set_item_pos("logo_img", pos=(10, dpg.get_viewport_client_height() - 40 - logo_dims[0]))
-    #dpg.set_item_pos("logo_text", pos=(10 + logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() - 40 - logo_dims[0] / 2))
-    dpg.set_item_pos("version_text", pos=(10 + logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() + 5 - logo_dims[0] / 2))
+def window_size_change(logo_dims, align="left"):
+
+    if align == "left":
+        # Update items anchored to side of window
+        dpg.set_item_pos("logo_img", pos=(10, dpg.get_viewport_client_height() - 40 - logo_dims[0]))
+        #dpg.set_item_pos("logo_text", pos=(10 + logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() - 40 - logo_dims[0] / 2))
+        dpg.set_item_pos("version_text", pos=(10 + logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() + 5 - logo_dims[0] / 2))
+    elif align == "right":
+        # Update items anchored to side of window
+        dpg.set_item_pos("logo_img", pos=(dpg.get_viewport_client_width() - 10 - logo_dims[1], dpg.get_viewport_client_height() - 40 - logo_dims[0]))
+        #dpg.set_item_pos("logo_text", pos=(dpg.get_viewport_client_width() - 10 - logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() - 40 - logo_dims[0] / 2))
+        dpg.set_item_pos("version_text", pos=(dpg.get_viewport_client_width() - 10 - logo_dims[1] / 2 - (30), dpg.get_viewport_client_height() + 5 - logo_dims[0] / 2))
 
 def askForSave():
     # TODO check for saving conditions
     dpg.stop_dearpygui()
 
-def fileNav(tag, callback, dir=False, extensions=[]):
-    with dpg.file_dialog(directory_selector=dir, show=False, callback=callback, tag=tag, cancel_callback=cancel_callback, width=700 ,height=400): 
+def fileNav(tag, callback, dir=False, extensions=[], default_path=""):
+    with dpg.file_dialog(directory_selector=dir, default_path=default_path, show=False, callback=callback, tag=tag, cancel_callback=cancel_callback, width=700 ,height=400): 
         dpg.add_file_extension(".*") 
         for ext in extensions:
             dpg.add_file_extension(ext, color=COLORS["heading"])
-
-
-class StatusLine:
-    def __init__(self, item=None) -> None:
-        self.status = ""
-        if item is None:
-            self.item = dpg.add_text(default_value=self.status)
-        else:
-            self.item = item
-        dpg.hide_item(self.item)
-        dpg.configure_item(self.item, color=COLORS["subtle"])
-        self.processing_box = None
-
-    def update(self, status="", color=None, box=False):
-        self.status = status
-
-        if dpg.does_item_exist(self.processing_box):
-            dpg.delete_item(self.processing_box)
-            dpg.split_frame()
-
-        dpg.set_value(self.item, self.status)
-        if color is not None:
-            dpg.configure_item(self.item, color=color)
-        else:
-            dpg.configure_item(self.item, color=(255, 255, 255, 255))
-        if self.status == "":
-            dpg.hide_item(self.item)
-        else:
-            dpg.show_item(self.item)
-            if box:
-                self.processing_box = showInfoBox("PROCESSING", self.status, options=None, loading=True)
-
-def showInfoBox(title, message, callback=None, options=[], options_data=[], loading=False):
-    """Shows info or confirmation pop up box."""
-
-    # Set color
-    if title == "ERROR":
-        color = COLORS["error"]
-    else:
-        color = (255, 255, 255, 255)
-
-    viewport_size = np.array((dpg.get_viewport_client_width(), dpg.get_viewport_client_height()))
-
-    # Create popup window
-    with dpg.window(label=title, modal=True, no_close=True) as infobox:
-        dpg.add_text(message, color=color)
-        if options is not None:
-            if callback is None:
-                callback = lambda: dpg.delete_item(infobox)
-            dpg.add_text()
-            with dpg.group(horizontal=True) as infobtns:
-                if len(options) > 0:
-                    for o, option in enumerate(options):
-                        if o < len(options_data):
-                            user_data = options_data[o]
-                        else:
-                            user_data = o
-                        dpg.add_button(label=option, user_data=[infobox, user_data], callback=callback)
-                else:
-                    dpg.add_button(label="OK", callback=callback)
-        elif loading:
-            loading_icon = dpg.add_loading_indicator(circle_count=6)
-
-    # Wait for next frame so size and position can be adjusted
-    dpg.split_frame()
-
-    window_size = np.array((dpg.get_item_width(infobox), dpg.get_item_height(infobox)))
-    dpg.split_frame() # seems to help reducing misplaced windows
-    dpg.set_item_pos(infobox, pos=(viewport_size - window_size) / 2)    # pos needs to be a float from dpg>=2.0
-
-    # Center buttons
-    if options is not None:
-        group_size = np.array(dpg.get_item_rect_size(infobtns))
-        dpg.set_item_pos(infobtns, ((window_size[0] - group_size[0]) / 2, dpg.get_item_pos(infobtns)[1]))    # pos needs to be a float from dpg>=2.0
-
-    # Center loading icon
-    if loading:
-        icon_size = dpg.get_item_rect_size(loading_icon)
-        dpg.set_item_pos(loading_icon, ((window_size[0] - icon_size[0]) / 2, dpg.get_item_pos(loading_icon)[1]))    # pos needs to be a float from dpg>=2.0
-
-    return infobox
-
-def saveSnapshot(element, file_path):
-    """Saves frame buffer to temp file, loads it and crops out element to save as image file."""
-
-    # Save whole frame as temp file (callback to directly obtain frame as array crashes)
-    log(f"DEBUG: Saving temp frame buffer image...")
-    temp_path = file_path.parent / "temp.png"
-    dpg.output_frame_buffer(str(temp_path))
-
-    # Wait until temp file is written
-    max_count = 4
-    counter = 0
-    while not temp_path.exists():
-        log(f"DEBUG: Waiting for temp frame buffer image [{temp_path}]...")
-        time.sleep(0.5)
-        counter += 1
-        if counter >= max_count:
-            log(f"ERROR: Snapshot failed! Saving snapshots might not be supported yet on your OS.")
-            showInfoBox("ERROR", "Snapshot failed! Saving snapshots might not be supported yet on your OS.")
-            return
-
-    # Load temp frame buffer image
-    log(f"DEBUG: Loading temp frame buffer image...")
-    frame = np.array(Image.open(temp_path))
-
-    # Get bounds of element
-    left, top = dpg.get_item_pos(element)
-    width, height = dpg.get_item_rect_size(element)
-
-    # Crop element
-    log(f"DEBUG: Element cropping dimensions: [{top}: {top + height}, {left}: {left + width}]")
-    cropped_frame = frame[top: top + height, left: left + width]
-
-    # Save cropped frame as image
-    Image.fromarray(cropped_frame).save(file_path)
-    log(f"NOTE: Saved snapshot at {file_path}")
-    showInfoBox("NOTE", f"Snapshot was saved to {file_path}")
-
-    # Delete temp frame buffer image
-    temp_path.unlink()

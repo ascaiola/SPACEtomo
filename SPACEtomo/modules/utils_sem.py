@@ -57,7 +57,12 @@ def checkImagingStates(states=[], low_dose_expected=[]):
 
     mag_list = []
     for s, state in enumerate(states):
-        error, index, low_dose, camera, mag_index, name = sem.ImagingStateProperties(str(state))
+        state_props = sem.ImagingStateProperties(str(state))
+
+        if isinstance(state_props, (list, tuple)):
+            error, index, low_dose, camera, mag_index, name = state_props
+        else:
+            error = state_props
 
         # Check if state exists
         if error > 0:
@@ -85,6 +90,28 @@ def checkImagingStates(states=[], low_dose_expected=[]):
         log("ERROR: Imaging states have duplicate magnifications!")
         sem.Exit()
 
+def getImagingStates():
+    """Returns a list of imaging states in SerialEM."""
+
+    imaging_states = []
+    for state in range(1, 100):
+        state_props = sem.ImagingStateProperties(str(state))
+
+        if isinstance(state_props, (list, tuple)):
+            error, index, low_dose, camera, mag_index, name = state_props
+        else:
+            error = state_props
+
+        if error > 0:
+            break # No more imaging states available
+
+        # Get pixel size
+        pixel_size = sem.CameraProperties(camera, mag_index)[4]
+        
+        imaging_states.append((index, name, low_dose, camera, mag_index, pixel_size))
+
+    return imaging_states
+
 def getSessionDir():
     """Sets up top level dir for SPACEtomo session."""
 
@@ -97,13 +124,30 @@ def getSessionDir():
         sem.SetPersistentVar("ses_dir", str(ses_dir))
     else:
         ses_dir = Path(sem.GetVariable("ses_dir"))
+        if not ses_dir.exists():
+            log(f"ERROR: Session directory [{ses_dir}] does not exist! Please run SPACEtomo again to choose a new directory.")
+            sem.CLearPersistentVars()
+            sem.Exit()
         setDirectory(ses_dir)
 
     # Check if grid dir was chosen instead
     if list(ses_dir.glob("*.nav")) or list(ses_dir.glob("SPACE_maps")):
+        sem.ClearPersistentVars() # Clear persistent vars to allow for new directory selection in case user does not continue
         confirmationBox("WARNING: It seems like you chose a grid directory instead of a session directory. A new folder for each grid will be created in the chosen directory.")
+        sem.SetPersistentVar("ses_dir", str(ses_dir)) # Save grid dir as session dir in case user continues
 
     return ses_dir
+
+def setSessionDir(ses_dir):
+    """Sets session directory in SerialEM and logs it."""
+
+    ses_dir = Path(ses_dir)
+    if not ses_dir.exists():
+        log(f"ERROR: Session directory [{ses_dir}] does not exist!")
+
+    setDirectory(ses_dir)
+    sem.SetPersistentVar("ses_dir", str(ses_dir))
+    log(f"DEBUG: Session directory set to {ses_dir}")
 
 def getGridList(grid_list, automation_level):
     """Checks which grids need to be processed."""

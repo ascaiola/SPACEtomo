@@ -371,7 +371,7 @@ class Buffer:
                 meta_data["original_map"] = Path(" ".join(self.nav.items[self.nav_id].entries["MapFile"])).as_posix()
             if "MapTiltAngle" in self.nav.items[self.nav_id].entries.keys():
                 meta_data["tilt_angle"] = float(self.nav.items[self.nav_id].entries["MapTiltAngle"][0])
-            # Can be extended if necessary
+            # Can be extended if necessary (also extend in mrc.py accordingly)
 
         # Add grid vectors if available
         if self.grid_vectors is not None:
@@ -621,15 +621,14 @@ class Buffer:
         spacing_px = spacing_nm / self.pix_size
         try:
             sem.StartTry(1)
-            spacing = sem.AutoCorrPeakVectors(self.buf, spacing_px, 0, int(config.DEBUG))
+            spacing = sem.AutoCorrPeakVectors(self.buf, spacing_px, 0, int(not config.DEBUG))
         except sem.SEMerror:
             log(f"WARNING: Finding grid pattern failed on buffer [{self.buf}].")
             return
         finally:
             sem.EndTry()
-
-        if config.DEBUG:
-            self.rollBuffers() # AutoCorrPeakVectors puts CC in buffer A
+            if config.DEBUG:
+                self.rollBuffers() # AutoCorrPeakVectors puts CC in buffer A
 
         self.grid_vectors = np.array(spacing[1:5]).reshape((2, 2)) * self.pix_size
         log(f"DEBUG: Found grid vectors: {self.grid_vectors} [nm]")
@@ -640,11 +639,13 @@ class Buffer:
         if abs(angle - 90) > 5:
             log(f"DEBUG: Grid vectors are not orthogonal!")
             self.grid_vectors = None
+            return
 
         # Check minimum size of grid vectors
         if np.linalg.norm(self.grid_vectors[0]) < 0.5 * spacing_nm or np.linalg.norm(self.grid_vectors[1]) < 0.5 * spacing_nm:
             log(f"DEBUG: Grid vectors are too short to be real: {np.linalg.norm(self.grid_vectors[0])}, {np.linalg.norm(self.grid_vectors[1])} nm")
             self.grid_vectors = None
+            return
 
     def __del__(self):
         """Cleans list of instances (but cannot delete current instance)."""
